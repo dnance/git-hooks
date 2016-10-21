@@ -1,0 +1,160 @@
+#!/bin/bash -u
+
+# This is a pre-pusht hook used to verify Go source is fmt'd, vet'd, and lint'd
+# If any of the above fail the push fails.
+
+# changelog
+# 1.0
+# Initial code
+
+
+
+# Setting environment variables
+case "$OSTYPE" in
+	darwin*)
+		export HOST_OS="darwin"
+		;;
+	linux*)
+		export HOST_OS="linux"
+		;;
+	*)
+		echo "unknown OS Type: $OSTYPE"
+		exit 1
+		;;
+esac
+
+	# Set target to current OS
+	TARGET_OS="$(go env GOOS)"
+
+REPO_PATH="${GOPATH}/src/github.comcast.com/viper-sde/geronimo"
+GO_VERSION="1.6"
+VERBOSE=0
+VERBOSEFLAG=>/dev/null
+
+function SetGoEnvironment {
+	# Export the GO Cross Compiling Environment variable
+	display "Setting Go Environment"
+	display "Build Host OS: $HOST_OS"
+	display "Build Target OS: $TARGET_OS"
+	# as of go 1.6.1 - cross compiling cgo is not complete
+	# Build static linked binary due to issue with Alpine containers using musl instead of glibc
+	export CGO_ENABLED=0
+
+	#  Let's set proper Cross Compile Options for our build tools
+	case "$HOST_OS" in
+		darwin)
+			export CC="clang"
+			export GOGCCFLAGS="-fPIC -m64 -pthread -fno-caret-diagnostics -Qunused-arguments -fmessage-length=0 -fno-common"
+			export CXX="clang++"
+			;;
+		linux)
+			export CC="gcc"
+			export GOGCCFLAGS="-fPIC -m64 -fmessage-length=0"
+			export CXX="g++"
+			;;
+		*)
+			echo "unknown Platform Type: $HOST_OS"
+			exit 1
+			;;
+	esac
+	#  Let's set Target Compile Options
+	case "$TARGET_OS" in
+		darwin)
+			export GOARCH="amd64"
+			export GOOS="darwin"
+			;;
+		linux)
+			export GOARCH="amd64"
+			export GOOS="linux"
+			;;
+		*)
+			echo "Unknown Target OS: $TARGET_OS"
+			exit 1
+			;;
+	esac
+	if [ "$VERBOSE" = 1 ]; then
+		echo "GO Environment"
+		go version
+		echo ""
+		echo "PATH = $PATH"
+		echo ""
+		go env
+		echo ""
+	fi
+}
+
+function display {
+	if [ "$VERBOSE" = 1 ]; then
+		echo "$1"
+	fi
+}
+
+echo "Running pre-push hook"
+echo ""
+
+# Check version of Go Language
+if ! (go version 2> /dev/null | grep "go$GO_VERSION" > /dev/null) ; then
+	echo "Expecting Go Version $GO_VERSION.   Current version is: [$(go version)]"
+	exit 1
+fi
+# Make sure GOPATH environment variable is set
+if [ -z ${GOPATH+x} ]; then
+	echo "GOPATH is not set";
+	exit 1
+else
+	export PATH=$PATH:$GOPATH/bin
+fi
+
+if [ -z "$TARGET_OS" ]; then
+	# Set target to current OS
+	TARGET_OS="$(go env GOOS)"
+fi
+
+# Display our Environment info
+display ""
+display "Build Host OS: $HOST_OS"
+display "Build Target OS: $TARGET_OS"
+SetGoEnvironment
+
+	echo -n "FMTing Everything"
+	fmt=$(gofmt -d $REPO_PATH)
+        if [[ ($? != 0) || ($fmt != "") ]]; then
+            echo " - Error!"
+            echo $fmt
+            echo "gofmt -d ${REPO_PATH} failed.  some files were not formatted correctly"
+            exit 1
+        fi;
+        echo " - OK"
+
+	echo -n "Vetting Everything"
+CWD=$PWD
+cd $REPO_PATH
+	output=$(go vet ./... 2>&1)
+	if [[ $? != 0 ]]; then
+                echo " - Error!"
+		echo $output
+		exit 1
+	fi;
+        echo " - OK"
+        cd $CWD
+
+	# And we will do lint
+	# We may need to go get lint first
+	if [ "$TARGET_OS" == "$HOST_OS" ]; then
+		if ! type "golint" > /dev/null 2>&1 ; then
+			echo "Getting golint Linter"
+			go get -u  "github.com/golang/lint/golint"
+		fi
+	fi
+
+	# older version of lint do not support the set_exit_status flag, so we check the output as well
+	echo -n "Linting Everything"
+	output=$(golint -set_exit_status $REPO_PATH/... 2>&1)
+	if [[($? != 0) || ("$output" != "") ]]; then
+                echo " - Error!"
+		echo $output
+		echo "Lint Failed"
+		exit 1
+	fi;
+        echo " - OK"
+
